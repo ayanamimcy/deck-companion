@@ -2,11 +2,16 @@
 
 import { call, toaster } from "@decky/api";
 import { Router } from "@decky/ui";
-import { TextRecognizer, NetworkError, ApiKeyError, RateLimitError, ModelNotAvailableError } from "./TextRecognizer";
+import { TextRecognizer, NetworkError, ApiKeyError, RateLimitError, ModelNotAvailableError, LLMError } from "./TextRecognizer";
 import { TextTranslator } from "./TextTranslator";
 import { Input, InputMode, ActionType, ProgressInfo } from "./Input";
 import { ImageState } from "./Overlay";
 import { logger } from "./Logger";
+import { LastTranslationCache } from "./TranslationCache";
+import {
+    renderTranslatedSteamScreenshot,
+    SteamScreenshotResponse,
+} from "./SteamScreenshot";
 
 // Screenshot response interface
 export interface ScreenshotResponse {
@@ -20,19 +25,25 @@ export class GameTranslatorLogic {
     public imageState: ImageState;
     private textRecognizer: TextRecognizer;
     private textTranslator: TextTranslator;
+    private translationCache = new LastTranslationCache();
+    private llmEndpointCacheKey = "";
     private shortcutInput: Input; // Added shortcut input handler
     private progressListeners: Array<(progressInfo: ProgressInfo) => void> = [];
     private enabled: boolean = true; // Add enabled state
     private confidenceThreshold: number = 0.6; // Default confidence threshold
     private pauseGameOnOverlay: boolean = false;
+    private passthroughMode: boolean = false;
     private hideIdenticalTranslations: boolean = false;
     private currentRunId: number = 0;
+    private steamScreenshotAnnotationInProgress = false;
+    private steamScreenshotTranslationEnabled = true;
+    private steamScreenshotKeepOriginal = false;
 
     // Provider settings for upfront validation
     private ocrProvider: string = "rapidocr";
-    private translationProvider: string = "freegoogle";
     private hasGoogleApiKey: boolean = false;
     private hasGeminiApiKey: boolean = false;
+    private hasSelectedLLMEndpoint: boolean = false;
 
     isOverlayVisible(): boolean {
         return this.imageState.isVisible();
@@ -71,11 +82,17 @@ export class GameTranslatorLogic {
                 if (!this.canStartTranslation()) return;
 
                 // Pause first so the game freezes before the screenshot
-                if (this.pauseGameOnOverlay) {
+                if (this.shouldPauseGameForOverlay()) {
                     this.pauseCurrentGame().catch(err => logger.error('Translator', 'Pause failed', err));
                 }
                 this.takeScreenshotAndTranslate().catch(err => logger.error('Translator', 'Screenshot failed', err));
             }
+        });
+
+        this.shortcutInput.onSteamScreenshotPressed(() => {
+            this.annotateSteamScreenshot().catch(error => {
+                logger.error('Translator', 'Steam screenshot annotation failed', error);
+            });
         });
 
         imageState.onStateChanged((visible, _, __, ___, ____, _____, ______, _______, ________) => {
@@ -83,7 +100,7 @@ export class GameTranslatorLogic {
 
             if (!this.enabled) return;
 
-            if (this.pauseGameOnOverlay && !visible) {
+            if (this.shouldPauseGameForOverlay() && !visible) {
                 this.resumeCurrentGame();
             }
         });
@@ -191,9 +208,30 @@ export class GameTranslatorLogic {
         logger.debug('Translator', `Setting pauseGameOnOverlay to: ${enabled}`);
         this.pauseGameOnOverlay = enabled;
 
-        // If overlay is currently visible and we're enabling this setting, pause the game
-        if (enabled && this.imageState.isVisible()) {
-            this.pauseCurrentGame();
+        if (this.imageState.isVisible()) {
+            if (this.shouldPauseGameForOverlay()) {
+                this.pauseCurrentGame();
+            } else {
+                this.resumeCurrentGame();
+            }
+        }
+    }
+
+    private shouldPauseGameForOverlay = (): boolean => {
+        return this.pauseGameOnOverlay && !this.passthroughMode;
+    }
+
+    setPassthroughMode = (enabled: boolean): void => {
+        const wasPausing = this.shouldPauseGameForOverlay();
+        this.passthroughMode = enabled;
+        this.imageState.setPassthroughMode(enabled);
+
+        if (this.imageState.isVisible() && wasPausing !== this.shouldPauseGameForOverlay()) {
+            if (this.shouldPauseGameForOverlay()) {
+                this.pauseCurrentGame();
+            } else {
+                this.resumeCurrentGame();
+            }
         }
     }
 
@@ -347,7 +385,7 @@ export class GameTranslatorLogic {
 
             this.imageState.startLoading("Processing");
             this.imageState.showImage(result.base64);
-            const recognizingStep = this.ocrProvider === 'gemini_vision'
+            const recognizingStep = this.ocrProvider === 'legacy_gemini_vision'
                 ? "Recognizing and Translating"
                 : "Recognizing";
             this.imageState.updateProcessingStep(recognizingStep, false, this.ocrMethodHint());
@@ -361,17 +399,34 @@ export class GameTranslatorLogic {
 
             if (textRegions.length > 0) {
                 const alreadyTranslated = textRegions.every(r => r.translatedText);
-                if (!alreadyTranslated) {
-                    this.imageState.updateProcessingStep("Translating text", false, this.translationMethodHint());
-                }
+                let translatedRegions = alreadyTranslated
+                    ? null
+                    : this.translationCache.get(textRegions);
 
-                // Translate text (skips backend call if already translated by OCR provider)
-                let translatedRegions = await this.textTranslator.translateText(textRegions);
-                if (isCancelled()) {
-                    logger.debug('Translator', 'Translation cancelled after translation step');
-                    return;
+                if (translatedRegions) {
+                    logger.info('Translator', `Translation cache hit: ${translatedRegions.length} regions`);
+                } else {
+                    const cacheRevision = this.translationCache.getRevision();
+                    if (!alreadyTranslated) {
+                        this.imageState.updateProcessingStep("Translating text", false, this.translationMethodHint());
+                    }
+
+                    // Legacy vision regions are already translated; normal OCR regions call the selected LLM.
+                    translatedRegions = await this.textTranslator.translateText(textRegions, result.base64);
+                    if (isCancelled()) {
+                        logger.debug('Translator', 'Translation cancelled after translation step');
+                        return;
+                    }
+                    logger.info('Translator', `Translation complete: ${translatedRegions.length} regions`);
+
+                    if (!alreadyTranslated && this.textTranslator.wasLastTranslationSuccessful()) {
+                        if (this.translationCache.store(textRegions, translatedRegions, cacheRevision)) {
+                            logger.debug('Translator', `Stored translation cache entry for ${textRegions.length} regions`);
+                        } else {
+                            logger.warn('Translator', 'Translation result was not cacheable because settings changed or region counts differed');
+                        }
+                    }
                 }
-                logger.info('Translator', `Translation complete: ${translatedRegions.length} regions`);
 
                 if (this.hideIdenticalTranslations) {
                     const before = translatedRegions.length;
@@ -426,6 +481,9 @@ export class GameTranslatorLogic {
                 setTimeout(() => {
                     this.imageState.hideImage();
                 }, 3000); // 3 seconds delay for rate limit error
+            } else if (error instanceof LLMError) {
+                this.imageState.updateProcessingStep(error.message, true);
+                setTimeout(() => this.imageState.hideImage(), 3000);
             } else {
                 this.imageState.hideImage();
             }
@@ -437,7 +495,197 @@ export class GameTranslatorLogic {
         }
     }
 
+    private annotateSteamScreenshot = async (): Promise<void> => {
+        const snapshot = this.imageState.getScreenshotOverlaySnapshot();
+        if (
+            !this.enabled
+            || !this.steamScreenshotTranslationEnabled
+            || !this.imageState.isVisible()
+            || snapshot.loading
+            || !snapshot.translationsVisible
+            || !snapshot.imageData
+            || snapshot.regions.length === 0
+        ) {
+            logger.debug('Translator', 'Steam screenshot has no ready visible translation overlay to include');
+            return;
+        }
+        if (this.steamScreenshotAnnotationInProgress) {
+            logger.warn('Translator', 'Steam screenshot annotation already in progress, keeping native screenshot');
+            return;
+        }
+
+        const appIdValue = Router.MainRunningApp?.appid;
+        if (appIdValue === undefined || appIdValue === null || String(appIdValue).trim() === '') {
+            logger.warn('Translator', 'Cannot annotate Steam screenshot without a running app ID');
+            return;
+        }
+
+        this.steamScreenshotAnnotationInProgress = true;
+        try {
+            // Keep the app ID as a string: non-Steam shortcut IDs can exceed
+            // JavaScript's safe integer range and must match Steam's directory exactly.
+            const appId = String(appIdValue);
+            logger.debug(
+                'Translator',
+                `Preparing Steam screenshot translation in ${this.steamScreenshotKeepOriginal ? 'copy' : 'replace'} mode`,
+            );
+            const response = await call<[string, number], SteamScreenshotResponse>(
+                'wait_for_steam_screenshot',
+                appId,
+                Date.now(),
+            );
+            if (
+                !response?.found
+                || !response.capture_token
+                || !response.mime
+                || !response.base64
+            ) {
+                logger.warn('Translator', `Native Steam screenshot not available: ${response?.reason || 'unknown'}`);
+                await this.notify(
+                    'Screenshot kept without translations',
+                    2500,
+                    'Steam screenshot file was not found in time',
+                );
+                return;
+            }
+
+            const annotatedImage = await renderTranslatedSteamScreenshot(
+                response.base64,
+                response.mime,
+                snapshot,
+            );
+            const result = await call<
+                [string, string],
+                {
+                    success: boolean;
+                    reason?: string;
+                    thumbnail_updated?: boolean;
+                    mode?: 'replace' | 'copy';
+                }
+            >(
+                'replace_steam_screenshot',
+                response.capture_token,
+                annotatedImage,
+            );
+            if (!result?.success) {
+                logger.warn('Translator', `Steam screenshot replacement failed: ${result?.reason || 'unknown'}`);
+                await this.notify(
+                    'Screenshot kept without translations',
+                    2500,
+                    'The original Steam screenshot was preserved',
+                );
+                return;
+            }
+
+            logger.info(
+                'Translator',
+                `Steam screenshot translation written; mode=${result.mode || 'replace'}, `
+                    + `thumbnail_updated=${Boolean(result.thumbnail_updated)}`,
+            );
+            await this.notify(
+                result.mode === 'copy'
+                    ? 'Translated screenshot copy saved'
+                    : 'Steam screenshot saved with translations',
+                1800,
+            );
+        } catch (error) {
+            logger.error('Translator', 'Could not annotate Steam screenshot; original remains intact', error);
+            await this.notify(
+                'Screenshot kept without translations',
+                2500,
+                'The original Steam screenshot was preserved',
+            );
+        } finally {
+            this.steamScreenshotAnnotationInProgress = false;
+        }
+    }
+
+    takeScreenshotAndTestOcr = async (): Promise<void> => {
+        if (this.isProcessing || !this.enabled) {
+            logger.debug('Translator', 'Already processing a screenshot or plugin disabled, skipping OCR test');
+            return;
+        }
+
+        if (!this.canStartOcrTest()) return;
+
+        if (this.imageState.isVisible()) {
+            this.dismiss();
+        }
+
+        const runId = ++this.currentRunId;
+        const isCancelled = (): boolean => runId !== this.currentRunId;
+
+        try {
+            this.isProcessing = true;
+
+            const appName = Router.MainRunningApp?.display_name || "";
+            logger.info('Translator', `Taking new screenshot for OCR test: ${appName}`);
+            const result = await call<[string], ScreenshotResponse>('take_screenshot', appName);
+
+            if (isCancelled()) {
+                logger.debug('Translator', 'OCR test cancelled before screenshot processed');
+                return;
+            }
+
+            if (!result || !result.path || !result.base64) {
+                logger.warn('Translator', 'OCR test screenshot capture failed, not opening overlay');
+                this.notify('Screen capture failed', 2500, 'Try the OCR test again');
+                return;
+            }
+
+            this.imageState.startLoading("Testing OCR");
+            this.imageState.showImage(result.base64);
+            this.imageState.updateProcessingStep("Recognizing", false, this.ocrMethodHint());
+
+            const textRegions = await this.textRecognizer.recognizeTextFile(result.path);
+            if (isCancelled()) {
+                logger.debug('Translator', 'OCR test cancelled after recognition');
+                return;
+            }
+            logger.info('Translator', `OCR test found ${textRegions.length} text regions`);
+
+            if (textRegions.length > 0) {
+                const recognizedRegions = textRegions.map(region => ({
+                    ...region,
+                    translatedText: region.text,
+                }));
+                this.imageState.showTranslatedImage(result.base64, recognizedRegions);
+            } else {
+                this.imageState.updateProcessingStep("No text found");
+                setTimeout(() => {
+                    if (!isCancelled()) this.imageState.hideImage();
+                }, 2000);
+            }
+        } catch (error) {
+            if (isCancelled()) {
+                logger.debug('Translator', 'OCR test cancelled, suppressing error UI', error);
+                return;
+            }
+
+            logger.error('Translator', 'OCR test error', error);
+            if (error instanceof NetworkError) {
+                this.imageState.updateProcessingStep(error.message || "No internet connection", true);
+            } else if (error instanceof ApiKeyError) {
+                this.imageState.updateProcessingStep(error.message || "Invalid API key", true);
+            } else if (error instanceof ModelNotAvailableError || error instanceof RateLimitError) {
+                this.imageState.updateProcessingStep(error.message, true);
+            } else {
+                this.imageState.updateProcessingStep("OCR test failed", true);
+            }
+            setTimeout(() => {
+                if (!isCancelled()) this.imageState.hideImage();
+            }, 3000);
+        } finally {
+            if (!isCancelled()) {
+                this.isProcessing = false;
+            }
+        }
+    }
+
     setInputLanguage = (language: string): void => {
+        if (language !== this.textTranslator.getInputLanguage()) {
+            this.translationCache.clear();
+        }
         this.textTranslator.setInputLanguage(language);
     }
 
@@ -446,6 +694,9 @@ export class GameTranslatorLogic {
     }
 
     setTargetLanguage = (language: string): void => {
+        if (language !== this.textTranslator.getTargetLanguage()) {
+            this.translationCache.clear();
+        }
         this.textTranslator.setTargetLanguage(language);
     }
 
@@ -503,6 +754,18 @@ export class GameTranslatorLogic {
         this.imageState.setFontScale(scale);
     }
 
+    setTextBoxOpacity = (opacity: number): void => {
+        this.imageState.setTextBoxOpacity(opacity);
+    }
+
+    setSteamScreenshotTranslationEnabled = (enabled: boolean): void => {
+        this.steamScreenshotTranslationEnabled = enabled;
+    }
+
+    setSteamScreenshotKeepOriginal = (enabled: boolean): void => {
+        this.steamScreenshotKeepOriginal = enabled;
+    }
+
     setAllowLabelGrowth = (allow: boolean): void => {
         this.imageState.setAllowLabelGrowth(allow);
     }
@@ -521,22 +784,23 @@ export class GameTranslatorLogic {
 
     // Methods for provider settings (used for upfront API key validation)
     setOcrProvider = (provider: string): void => {
+        if (provider !== this.ocrProvider) {
+            this.translationCache.clear();
+        }
         this.ocrProvider = provider;
         logger.debug('Translator', `OCR provider set to: ${provider}`);
     }
 
-    setTranslationProvider = (provider: string): void => {
-        this.translationProvider = provider;
-        logger.debug('Translator', `Translation provider set to: ${provider}`);
+    setLlmEndpointCacheKey = (cacheKey: string): void => {
+        if (cacheKey !== this.llmEndpointCacheKey) {
+            this.llmEndpointCacheKey = cacheKey;
+            this.translationCache.clear();
+            logger.debug('Translator', 'Translation cache cleared because the LLM endpoint changed');
+        }
     }
 
     private translationMethodHint(): string {
-        const labels: Record<string, string> = {
-            ct2: "On-Device",
-            freegoogle: "Google Translate",
-            googlecloud: "Google Cloud",
-        };
-        return labels[this.translationProvider] || this.translationProvider;
+        return "Selected LLM endpoint";
     }
 
     private ocrMethodHint(): string {
@@ -545,7 +809,7 @@ export class GameTranslatorLogic {
             chromescreenai: "On-Device",
             ocrspace: "OCR.space",
             googlecloud: "Google Cloud",
-            gemini_vision: "Gemini Vision",
+            legacy_gemini_vision: "Legacy Gemini Vision",
         };
         return labels[this.ocrProvider] || this.ocrProvider;
     }
@@ -558,6 +822,10 @@ export class GameTranslatorLogic {
     setHasGeminiApiKey = (hasKey: boolean): void => {
         this.hasGeminiApiKey = hasKey;
         logger.debug('Translator', `Gemini API key available: ${hasKey}`);
+    }
+
+    setHasSelectedLLMEndpoint = (hasEndpoint: boolean): void => {
+        this.hasSelectedLLMEndpoint = hasEndpoint;
     }
 
     // Runs all pre-checks that would prevent a translation from starting.
@@ -597,23 +865,49 @@ export class GameTranslatorLogic {
         return true;
     }
 
+    private canStartOcrTest(): boolean {
+        if (this.ocrProvider === 'legacy_gemini_vision') {
+            this.notify(
+                "OCR-only test unavailable",
+                3000,
+                "Legacy Gemini Vision combines recognition and translation in one request.",
+            );
+            return false;
+        }
+
+        if (!this.getInputLanguage()) {
+            this.notify(
+                "Input language is not set",
+                3000,
+                "Select an input language before testing OCR.",
+            );
+            return false;
+        }
+
+        if (this.ocrProvider === 'googlecloud' && !this.hasGoogleApiKey) {
+            this.notify(
+                "API key required for OCR",
+                3000,
+                "Configure the Google Cloud OCR API key before testing.",
+            );
+            return false;
+        }
+
+        return true;
+    }
+
     // Check if the current provider configuration requires an API key that's missing
     private requiresApiKeyButMissing(): { missing: boolean; message: string } {
-        if (this.ocrProvider === 'gemini_vision' && !this.hasGeminiApiKey) {
-            return { missing: true, message: "Gemini API key required for Gemini Vision" };
+        if (this.ocrProvider === 'legacy_gemini_vision' && !this.hasGeminiApiKey) {
+            return { missing: true, message: "Gemini API key required for Legacy Gemini Vision" };
         }
 
         const ocrNeedsKey = this.ocrProvider === 'googlecloud';
-        const translationNeedsKey = this.translationProvider === 'googlecloud';
-
-        if ((ocrNeedsKey || translationNeedsKey) && !this.hasGoogleApiKey) {
-            if (ocrNeedsKey && translationNeedsKey) {
-                return { missing: true, message: "API key required for OCR & Translation" };
-            } else if (ocrNeedsKey) {
-                return { missing: true, message: "API key required for OCR" };
-            } else {
-                return { missing: true, message: "API key required for Translation" };
-            }
+        if (ocrNeedsKey && !this.hasGoogleApiKey) {
+            return { missing: true, message: "API key required for OCR" };
+        }
+        if (this.ocrProvider !== 'legacy_gemini_vision' && !this.hasSelectedLLMEndpoint) {
+            return { missing: true, message: "Select an LLM endpoint" };
         }
         return { missing: false, message: "" };
     }
