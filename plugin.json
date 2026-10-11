@@ -1,11 +1,15 @@
 {
-  "name": "Decky LLM Translator",
-  "author": "Raindropx",
+  "name": "Deck Companion",
+  "author": "ayanamimcy",
   "api_version": 1,
   "flags": [],
   "publish": {
-    "tags": ["Translation"],
-    "description": "Translate on-screen game text with configurable LLM endpoints",
-    "image": "https://raw.githubusercontent.com/Raindropx/Decky-LLM-Translator/main/assets/store-image.png"
+    "tags": [
+      "Translation",
+      "AI",
+      "Learning"
+    ],
+    "description": "按需翻译游戏画面（日语→中文）、生词与语法学习、带截图的 AI 对话",
+    "image": ""
   }
 }

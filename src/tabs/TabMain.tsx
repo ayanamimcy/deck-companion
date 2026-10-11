@@ -137,7 +137,7 @@ export const TabMain: VFC<TabMainProps> = ({ logic, overlayVisible, providerStat
                         label={settings.enabled ? t("Plugin is enabled") : t("Plugin is disabled")}
                         description={t("Toggle the functionality on or off")}
                         checked={settings.enabled}
-                        onChange={(value) => updateSetting('enabled', value, 'Decky LLM Translator')}
+                        onChange={(value) => updateSetting('enabled', value, 'Deck Companion')}
                     />
                 </PanelSectionRow>
 

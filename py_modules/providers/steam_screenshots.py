@@ -171,7 +171,7 @@ def _atomic_write(path: Path, data: bytes) -> None:
     try:
         with tempfile.NamedTemporaryFile(
             mode="wb",
-            prefix=".decky-llm-translator-",
+            prefix=".deck-companion-",
             suffix=path.suffix,
             dir=path.parent,
             delete=False,
@@ -197,7 +197,7 @@ def _atomic_create(path: Path, data: bytes, mode: int = 0o644) -> None:
     try:
         with tempfile.NamedTemporaryFile(
             mode="wb",
-            prefix=".decky-llm-translator-",
+            prefix=".deck-companion-",
             suffix=path.suffix,
             dir=path.parent,
             delete=False,

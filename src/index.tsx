@@ -182,18 +182,18 @@ const GameTranslator: VFC<{ logic: GameTranslatorLogic }> = ({ logic }) => {
         <>
             <style>
                 {`
-                .decky-llm-translator-tabs > div > div:first-child::before {
+                .deck-companion-tabs > div > div:first-child::before {
                     background: #0D141C;
                     box-shadow: none;
                     backdrop-filter: none;
                 }
-                .decky-llm-translator-tabs [role="tabpanel"] {
+                .deck-companion-tabs [role="tabpanel"] {
                     padding-left: 0 !important;
                     padding-right: 0 !important;
                 }
                 ${pluginUIFontFamily ? `
-                .decky-llm-translator-tabs,
-                .decky-llm-translator-tabs * {
+                .deck-companion-tabs,
+                .deck-companion-tabs * {
                     font-family: ${pluginUIFontFamily} !important;
                 }
                 ` : ''}
@@ -201,7 +201,7 @@ const GameTranslator: VFC<{ logic: GameTranslatorLogic }> = ({ logic }) => {
             </style>
 
             <div
-                className="decky-llm-translator-tabs"
+                className="deck-companion-tabs"
                 lang={pluginLocale}
                 data-plugin-locale={pluginLocale}
                 style={{
@@ -348,26 +348,26 @@ export default definePlugin(() => {
     const logic = new GameTranslatorLogic(imageState);
 
     // Add image overlay as a global component
-    routerHook.addGlobalComponent("DeckyLLMTranslatorImageOverlay", () => (
+    routerHook.addGlobalComponent("DeckCompanionImageOverlay", () => (
         <ImageOverlay state={imageState} onDismiss={logic.dismiss}/>
     ));
 
     // Add activation indicator as a global component
-    routerHook.addGlobalComponent("DeckyLLMTranslatorHoldActivationIndicator", () => (
+    routerHook.addGlobalComponent("DeckCompanionHoldActivationIndicator", () => (
         <HoldActivationIndicator logic={logic}/>
     ));
 
     return {
-        name: "DeckyLLMTranslator",
-        title: <div className={staticClasses.Title}>Decky LLM Translator</div>,
+        name: "DeckCompanion",
+        title: <div className={staticClasses.Title}>Deck Companion</div>,
         content: <TranslatorApp logic={logic}/>,
         icon: <BsTranslate/>,
         onDismount() {
             // Clean up resources
             logic.cleanup();
             cleanupAllFontDOM();
-            routerHook.removeGlobalComponent("DeckyLLMTranslatorImageOverlay");
-            routerHook.removeGlobalComponent("DeckyLLMTranslatorHoldActivationIndicator");
+            routerHook.removeGlobalComponent("DeckCompanionImageOverlay");
+            routerHook.removeGlobalComponent("DeckCompanionHoldActivationIndicator");
         },
         alwaysRender: true
     };

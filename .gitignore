@@ -68,3 +68,4 @@ cli/
 # Local-only files
 /docs
 /nul
+.venv/

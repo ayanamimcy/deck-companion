@@ -1,17 +1,17 @@
 {
-  "name": "decky-llm-translator",
-  "version": "0.5.1",
+  "name": "deck-companion",
+  "version": "0.1.0",
   "type": "module",
-  "description": "Translate on-screen game text with configurable LLM endpoints while preserving OCR-based positioning.",
+  "description": "Game companion for Decky: on-demand screen translation (Japanese → Chinese) with vocabulary/grammar learning, and an AI chat with screenshots.",
   "scripts": {
     "build": "shx rm -rf dist && rollup -c",
     "watch": "rollup -c -w",
     "test": "node --test tests/i18n.test.mjs tests/translation-cache.test.mjs tests/ask-ai-state.test.mjs tests/overlay-layer.test.mjs",
-    "build:deck": "wsl -e sh -c \"rm -rf out node_modules && ./cli/decky plugin build . -o ./out\""
+    "build:deck": "rm -rf out && decky plugin build . -o ./out"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Raindropx/Decky-LLM-Translator.git"
+    "url": "git+https://github.com/ayanamimcy/deck-companion.git"
   },
   "keywords": [
     "decky",
@@ -21,12 +21,12 @@
     "steam-deck",
     "deck"
   ],
-  "author": "Raindropx",
+  "author": "ayanamimcy",
   "license": "GNU GPLv3",
   "bugs": {
-    "url": "https://github.com/Raindropx/Decky-LLM-Translator/issues"
+    "url": "https://github.com/ayanamimcy/deck-companion/issues"
   },
-  "homepage": "https://github.com/Raindropx/Decky-LLM-Translator",
+  "homepage": "https://github.com/ayanamimcy/deck-companion",
   "devDependencies": {
     "@decky/api": "^1.1.3",
     "@decky/rollup": "^1.0.1",
@@ -49,8 +49,8 @@
   "remote_binary": [
     {
       "name": "plugin-dependencies.tar.gz",
-      "url": "https://github.com/Raindropx/Decky-LLM-Translator/releases/download/v0.5.1/plugin-dependencies.tar.gz",
-      "sha256hash": "1c444272c679e16eef3b7d92135e5424158330db8e965a8b93d352ac5c5219db"
+      "url": "https://github.com/ayanamimcy/deck-companion/releases/download/deps-v1/plugin-dependencies.tar.gz",
+      "sha256hash": "TODO-set-after-building-deps"
     }
   ]
 }

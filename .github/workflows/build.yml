@@ -195,31 +195,31 @@ jobs:
       - name: Package plugin
         run: |
           rm -rf out
-          STAGE="out/_staging/decky-llm-translator"
+          STAGE="out/_staging/deck-companion"
           mkdir -p "$STAGE/dist" "$STAGE/py_modules"
           cp main.py plugin.json package.json README.md LICENSE "$STAGE/"
           cp -R dist/. "$STAGE/dist/"
           cp -R py_modules/providers "$STAGE/py_modules/"
           find "$STAGE" -type d -name __pycache__ -prune -exec rm -rf {} +
           find "$STAGE" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
-          (cd out/_staging && zip -qr "../Decky LLM Translator.zip" decky-llm-translator)
+          (cd out/_staging && zip -qr "../Deck Companion.zip" deck-companion)
           python - <<'PY'
           from pathlib import PurePosixPath
           from zipfile import ZipFile
 
-          archive = "out/Decky LLM Translator.zip"
+          archive = "out/Deck Companion.zip"
           with ZipFile(archive) as bundle:
               files = [name.replace("\\", "/") for name in bundle.namelist() if not name.endswith("/")]
 
           roots = sorted({PurePosixPath(name).parts[0] for name in files})
-          if roots != ["decky-llm-translator"]:
+          if roots != ["deck-companion"]:
               raise SystemExit(f"unexpected ZIP roots: {roots}")
 
           required = {
-              "decky-llm-translator/plugin.json",
-              "decky-llm-translator/package.json",
-              "decky-llm-translator/main.py",
-              "decky-llm-translator/dist/index.js",
+              "deck-companion/plugin.json",
+              "deck-companion/package.json",
+              "deck-companion/main.py",
+              "deck-companion/dist/index.js",
           }
           missing = sorted(required.difference(files))
           if missing:
@@ -233,7 +233,7 @@ jobs:
       - name: Upload plugin artifact
         uses: actions/upload-artifact@v4
         with:
-          name: decky-llm-translator-plugin
+          name: deck-companion-plugin
           path: out/*.zip
 
       - name: Upload dependencies artifact
@@ -252,7 +252,7 @@ jobs:
       - name: Download plugin artifact
         uses: actions/download-artifact@v4
         with:
-          name: decky-llm-translator-plugin
+          name: deck-companion-plugin
           path: ./
 
       - name: Download dependencies artifact
@@ -267,7 +267,7 @@ jobs:
           tag_name: ${{ needs.build.outputs.version }}
           token: ${{ github.token }}
           files: |
-            Decky LLM Translator.zip
+            Deck Companion.zip
             plugin-dependencies.tar.gz
           draft: true
           generate_release_notes: true

@@ -56,15 +56,15 @@ def _should_extract_dependencies():
 
 if _should_extract_dependencies():
     try:
-        print(f"[Decky LLM Translator] Extracting dependencies from {DEPENDENCIES_ARCHIVE}...")
+        print(f"[Deck Companion] Extracting dependencies from {DEPENDENCIES_ARCHIVE}...")
         with tarfile.open(DEPENDENCIES_ARCHIVE, "r:gz") as tar:
             tar.extractall(path=BIN_DIR)
         # Create marker file to indicate successful extraction
         with open(EXTRACTION_MARKER, "w") as f:
             f.write(f"Extracted at {datetime.now().isoformat()}\n")
-        print(f"[Decky LLM Translator] Dependencies extracted successfully")
+        print(f"[Deck Companion] Dependencies extracted successfully")
     except Exception as e:
-        print(f"[Decky LLM Translator] Failed to extract dependencies: {e}")
+        print(f"[Deck Companion] Failed to extract dependencies: {e}")
         # Remove marker if it exists, so we retry next time
         if os.path.exists(EXTRACTION_MARKER):
             os.remove(EXTRACTION_MARKER)
@@ -212,15 +212,15 @@ logger.debug(f"GStreamer plugins path: {GSTPLUGINSPATH}")
 os.makedirs(DECKY_PLUGIN_LOG_DIR, exist_ok=True)
 
 # Set up log files
-std_out_file_path = Path(DECKY_PLUGIN_LOG_DIR) / "decky-llm-translator-std-out.log"
+std_out_file_path = Path(DECKY_PLUGIN_LOG_DIR) / "deck-companion-std-out.log"
 std_out_file = open(std_out_file_path, "w")
-std_err_file = open(Path(DECKY_PLUGIN_LOG_DIR) / "decky-llm-translator-std-err.log", "w")
+std_err_file = open(Path(DECKY_PLUGIN_LOG_DIR) / "deck-companion-std-err.log", "w")
 logger.debug(f"Standard output logs: {std_out_file_path}")
 
 # Set up file logging
 from logging.handlers import TimedRotatingFileHandler
 
-log_file = Path(DECKY_PLUGIN_LOG_DIR) / "decky-llm-translator.log"
+log_file = Path(DECKY_PLUGIN_LOG_DIR) / "deck-companion.log"
 log_file_handler = TimedRotatingFileHandler(log_file, when="midnight", backupCount=2)
 log_file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 log_file_handler.addFilter(_url_redact_filter)
@@ -235,7 +235,7 @@ try:
         _plugin_version = json.load(_pkg).get("version", "unknown")
 except Exception as _e:
     _plugin_version = "unknown"
-logger.info(f"Decky LLM Translator v{_plugin_version} starting")
+logger.info(f"Deck Companion v{_plugin_version} starting")
 
 
 import threading
@@ -1190,7 +1190,7 @@ def get_base64_image(image_path):
 
 class Plugin:
     _filepath: str = None
-    _screenshotPath: str = "/tmp/decky-llm-translator"  # Plugin-private temporary screenshots
+    _screenshotPath: str = "/tmp/deck-companion"  # Plugin-private temporary screenshots
     _settings = None
     _input_language: str = "auto"  # Default to auto-detect
     _target_language: str = "en"
@@ -3092,7 +3092,7 @@ class Plugin:
         logger.info("Plugin initialization started")
         try:
             self._settings = SettingsManager(
-                name="decky-llm-translator-settings",
+                name="deck-companion-settings",
                 settings_directory=settingsDir
             )
             self._settings.read()
@@ -3212,11 +3212,11 @@ class Plugin:
                 self._settings.set_setting("default_ocr_provider_migrated_v1", True)
 
             # Keep OCR models under this plugin's private uninstall lifecycle.
-            screenai_models_dir = os.path.join(settingsDir, "decky-llm-translator", "models")
+            screenai_models_dir = os.path.join(settingsDir, "deck-companion", "models")
             os.makedirs(screenai_models_dir, exist_ok=True)
 
             # RapidOCR and Chrome Screen AI models persist across plugin updates.
-            rapidocr_models_dir = os.path.join(settingsDir, "decky-llm-translator", "models")
+            rapidocr_models_dir = os.path.join(settingsDir, "deck-companion", "models")
             os.makedirs(rapidocr_models_dir, exist_ok=True)
 
             # Initialize provider manager

@@ -27,7 +27,7 @@ class ReleasePackageUpdateTests(unittest.TestCase):
 
             update_package_release.update_package_release(
                 package_path,
-                "Raindropx/Decky-LLM-Translator",
+                "ayanamimcy/deck-companion",
                 "v0.2.1",
                 "a" * 64,
                 "0.2.1",
@@ -38,18 +38,15 @@ class ReleasePackageUpdateTests(unittest.TestCase):
             dependency = updated["remote_binary"][0]
             self.assertEqual(
                 dependency["url"],
-                "https://github.com/Raindropx/Decky-LLM-Translator/releases/download/v0.2.1/plugin-dependencies.tar.gz",
+                "https://github.com/ayanamimcy/deck-companion/releases/download/v0.2.1/plugin-dependencies.tar.gz",
             )
             self.assertEqual(dependency["sha256hash"], "a" * 64)
 
     def test_workflow_uses_fork_artifact_names(self):
         workflow = (REPO_ROOT / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
-        self.assertNotIn("cat-in-a-box", workflow)
-        self.assertNotIn('"Decky Translator.zip"', workflow)
-        self.assertNotIn("decky-translator-plugin", workflow)
-        self.assertIn("Decky LLM Translator.zip", workflow)
-        self.assertIn("decky-llm-translator-plugin", workflow)
-        self.assertIn('STAGE="out/_staging/decky-llm-translator"', workflow)
+        self.assertIn("Deck Companion.zip", workflow)
+        self.assertIn("deck-companion-plugin", workflow)
+        self.assertIn('STAGE="out/_staging/deck-companion"', workflow)
         self.assertNotIn("cli/decky plugin build", workflow)
 
 
