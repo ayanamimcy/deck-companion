@@ -29,6 +29,7 @@ import { ProgressInfo } from "./Input";
 import { ActivationIndicator } from "./ActivationIndicator";
 import { SettingsProvider, useSettings } from "./SettingsContext";
 import { logger } from "./Logger";
+import { getPluginUIFontFamily, resolvePluginLocale, t } from "./i18n";
 
 // Import tab components
 import { TabMain, TabTranslation, TabControls } from "./tabs";
@@ -55,6 +56,8 @@ const IconGear = () => (
 // Main plugin component
 const GameTranslator: VFC<{ logic: GameTranslatorLogic }> = ({ logic }) => {
     const { settings, initialized } = useSettings();
+    const pluginLocale = resolvePluginLocale(settings.pluginLanguage);
+    const pluginUIFontFamily = getPluginUIFontFamily(pluginLocale);
     const [overlayVisible, setOverlayVisible] = useState<boolean>(logic.isOverlayVisible());
     const [inputDiagnostics, setInputDiagnostics] = useState<any>(null);
     const [providerStatus, setProviderStatus] = useState<any>(null);
@@ -165,11 +168,13 @@ const GameTranslator: VFC<{ logic: GameTranslatorLogic }> = ({ logic }) => {
     // Show loading state if not initialized
     if (!initialized) {
         return (
-            <PanelSection>
-                <PanelSectionRow>
-                    <div>Loading...</div>
-                </PanelSectionRow>
-            </PanelSection>
+            <div lang={pluginLocale} style={{ fontFamily: pluginUIFontFamily }}>
+                <PanelSection>
+                    <PanelSectionRow>
+                        <div>{t("Loading...")}</div>
+                    </PanelSectionRow>
+                </PanelSection>
+            </div>
         );
     }
 
@@ -186,10 +191,28 @@ const GameTranslator: VFC<{ logic: GameTranslatorLogic }> = ({ logic }) => {
                     padding-left: 0 !important;
                     padding-right: 0 !important;
                 }
+                ${pluginUIFontFamily ? `
+                .decky-llm-translator-tabs,
+                .decky-llm-translator-tabs * {
+                    font-family: ${pluginUIFontFamily} !important;
+                }
+                ` : ''}
                 `}
             </style>
 
-            <div className="decky-llm-translator-tabs" style={{ height: "95%", width: "300px", position: "fixed", marginTop: "-12px", overflow: "hidden" }}>
+            <div
+                className="decky-llm-translator-tabs"
+                lang={pluginLocale}
+                data-plugin-locale={pluginLocale}
+                style={{
+                    height: "95%",
+                    width: "300px",
+                    position: "fixed",
+                    marginTop: "-12px",
+                    overflow: "hidden",
+                    fontFamily: pluginUIFontFamily,
+                }}
+            >
                 <Tabs
                     activeTab={currentTabRoute}
                     // @ts-ignore
@@ -224,7 +247,6 @@ const GameTranslator: VFC<{ logic: GameTranslatorLogic }> = ({ logic }) => {
 
 // Activation Indicator component
 const HoldActivationIndicator: VFC<{ logic: GameTranslatorLogic }> = ({logic}) => {
-    const {settings} = useSettings();
     const [progressInfo, setProgressInfo] = useState<ProgressInfo>({
         active: false,
         progress: 0,
@@ -276,14 +298,18 @@ const HoldActivationIndicator: VFC<{ logic: GameTranslatorLogic }> = ({logic}) =
     const getActivationText = () => {
         if (!progressInfo.active) return "";
 
-        const action = progressInfo.forDismiss ? "Dismiss" : "Translate";
-        const timeRequired = `${(progressInfo.forDismiss ? settings.holdTimeDismiss : settings.holdTimeTranslate) / 1000}s`;
-
-        return `Hold to ${action} (${timeRequired})`;
+        const timeRequired = (
+            progressInfo.forDismiss
+                ? logic.getHoldTimeDismiss()
+                : logic.getHoldTimeTranslate()
+        ) / 1000;
+        return progressInfo.forDismiss
+            ? t('Hold to Dismiss ({time}s)', { time: timeRequired })
+            : t('Hold to Translate ({time}s)', { time: timeRequired });
     };
 
     // Only show the indicator if the plugin is enabled
-    if (!settings.enabled) {
+    if (!logic.isEnabled()) {
         return null;
     }
 
@@ -306,15 +332,6 @@ const TranslatorApp: VFC<{ logic: GameTranslatorLogic }> = ({ logic }) => {
     );
 };
 
-// Indicator wrapped with Settings provider
-const ActivationIndicatorWithSettings: VFC<{ logic: GameTranslatorLogic }> = ({ logic }) => {
-    return (
-        <SettingsProvider logic={logic}>
-            <HoldActivationIndicator logic={logic}/>
-        </SettingsProvider>
-    );
-};
-
 // Export the plugin
 export default definePlugin(() => {
     // Create image state to manage the overlay
@@ -330,7 +347,7 @@ export default definePlugin(() => {
 
     // Add activation indicator as a global component
     routerHook.addGlobalComponent("DeckyLLMTranslatorHoldActivationIndicator", () => (
-        <ActivationIndicatorWithSettings logic={logic}/>
+        <HoldActivationIndicator logic={logic}/>
     ));
 
     return {

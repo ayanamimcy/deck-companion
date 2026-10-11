@@ -12,11 +12,53 @@ import {
     renderTranslatedSteamScreenshot,
     SteamScreenshotResponse,
 } from "./SteamScreenshot";
+import { t } from "./i18n";
+import type { LLMEndpoint } from "./LLMEndpoints";
 
 // Screenshot response interface
 export interface ScreenshotResponse {
     path: string;
     base64: string;
+}
+
+export interface RuntimeSettingsSnapshot {
+    input_language: string;
+    target_language: string;
+    input_mode: InputMode;
+    enabled: boolean;
+    hold_time_translate: number;
+    hold_time_dismiss: number;
+    confidence_threshold: number;
+    pause_game_on_overlay: boolean;
+    quick_toggle_enabled: boolean;
+    debug_mode: boolean;
+    passthrough_mode: boolean;
+    text_box_opacity: number;
+    steam_screenshot_translation_enabled: boolean;
+    steam_screenshot_keep_original: boolean;
+    ocr_provider: 'rapidocr' | 'ocrspace' | 'googlecloud' | 'legacy_gemini_vision' | 'chromescreenai';
+    google_api_key_configured: boolean;
+    gemini_api_key_configured: boolean;
+    llm_endpoints: LLMEndpoint[];
+    selected_llm_endpoint_id: string;
+    font_scale: number;
+    grouping_power: number;
+    translated_text_alignment: 'left' | 'right' | 'center' | 'justify';
+    translated_text_font_family: string;
+    translated_text_font_style: 'normal' | 'bold' | 'italic' | 'bolditalic';
+    hide_identical_translations: boolean;
+    allow_label_growth: boolean;
+}
+
+export function isRuntimeSettingsSnapshot(value: unknown): value is RuntimeSettingsSnapshot {
+    if (typeof value !== 'object' || value === null) return false;
+    const settings = value as Partial<RuntimeSettingsSnapshot>;
+    return Number.isInteger(settings.input_mode)
+        && typeof settings.enabled === 'boolean'
+        && typeof settings.input_language === 'string'
+        && typeof settings.target_language === 'string'
+        && Array.isArray(settings.llm_endpoints)
+        && typeof settings.selected_llm_endpoint_id === 'string';
 }
 
 // Main app logic
@@ -38,6 +80,8 @@ export class GameTranslatorLogic {
     private steamScreenshotAnnotationInProgress = false;
     private steamScreenshotTranslationEnabled = true;
     private steamScreenshotKeepOriginal = false;
+    private runtimeSettingsApplied = false;
+    private disposed = false;
 
     // Provider settings for upfront validation
     private ocrProvider: string = "rapidocr";
@@ -61,6 +105,9 @@ export class GameTranslatorLogic {
 
         // Initialize for hidraw-based button detection
         this.shortcutInput = new Input();
+        // Runtime settings are loaded asynchronously. Keep the hard-coded input
+        // defaults from accepting a shortcut before the saved mode is known.
+        this.shortcutInput.setEnabled(false);
 
         // Set up listener for translate, dismiss, and toggle actions
         this.shortcutInput.onShortcutPressed((actionType: ActionType) => {
@@ -81,11 +128,7 @@ export class GameTranslatorLogic {
                 if (this.isProcessing) return;
                 if (!this.canStartTranslation()) return;
 
-                // Pause first so the game freezes before the screenshot
-                if (this.shouldPauseGameForOverlay()) {
-                    this.pauseCurrentGame().catch(err => logger.error('Translator', 'Pause failed', err));
-                }
-                this.takeScreenshotAndTranslate().catch(err => logger.error('Translator', 'Screenshot failed', err));
+                this.takeScreenshotAndTranslate(true).catch(err => logger.error('Translator', 'Screenshot failed', err));
             }
         });
 
@@ -114,27 +157,77 @@ export class GameTranslatorLogic {
         this.loadInitialState();
     }
 
-    // Load initial state from server
+    // Load all runtime settings independently of the settings panel lifecycle.
+    // Decky can mount the global shortcut components before it mounts plugin
+    // content, so relying on SettingsProvider left the logic on its L5/no-LLM
+    // defaults until the user opened the panel.
     private async loadInitialState() {
-        try {
-            const result = await call<[], boolean>('get_enabled_state');
-            this.enabled = !!result;
-            logger.info('Translator', `Loaded initial enabled state: ${this.enabled}`);
+        const maxAttempts = 5;
+        for (let attempt = 1; attempt <= maxAttempts && !this.disposed; attempt++) {
+            try {
+                const settings = await call<[], unknown>('get_all_settings');
+                if (this.disposed) return;
 
-            if (this.shortcutInput) {
-                this.shortcutInput.setEnabled(this.enabled);
+                if (isRuntimeSettingsSnapshot(settings)) {
+                    // SettingsProvider may have completed first. In that case it
+                    // has the equally fresh snapshot and may already include a
+                    // user change, so do not overwrite it with this response.
+                    if (!this.runtimeSettingsApplied) {
+                        this.applyRuntimeSettings(settings);
+                    }
+                    logger.info('Translator', 'Runtime settings loaded at startup');
+
+                    if (!this.enabled) {
+                        logger.info('Translator', 'Plugin is disabled on startup, stopping hidraw monitor');
+                        call('stop_hidraw_monitor').catch(error => {
+                            logger.error('Translator', 'Failed to stop hidraw monitor on startup', error);
+                        });
+                    }
+                    return;
+                }
+
+                logger.warn('Translator', `Runtime settings were not ready (attempt ${attempt}/${maxAttempts})`);
+            } catch (error) {
+                logger.error('Translator', `Failed to load runtime settings (attempt ${attempt}/${maxAttempts})`, error);
             }
 
-            // If plugin starts disabled, stop the hidraw monitor that was auto-started
-            if (!this.enabled) {
-                logger.info('Translator', 'Plugin is disabled on startup, stopping hidraw monitor');
-                call('stop_hidraw_monitor').catch(error => {
-                    logger.error('Translator', 'Failed to stop hidraw monitor on startup', error);
-                });
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, attempt * 250));
             }
-        } catch (error) {
-            logger.error('Translator', 'Failed to load initial state', error);
         }
+
+        logger.error('Translator', 'Runtime settings could not be loaded; shortcut input remains disabled');
+    }
+
+    applyRuntimeSettings(settings: RuntimeSettingsSnapshot): void {
+        this.setInputLanguage(settings.input_language);
+        this.setTargetLanguage(settings.target_language);
+        this.setInputMode(settings.input_mode);
+        this.setHoldTimeTranslate(settings.hold_time_translate);
+        this.setHoldTimeDismiss(settings.hold_time_dismiss);
+        this.setConfidenceThreshold(settings.confidence_threshold || 0.6);
+        this.setPauseGameOnOverlay(settings.pause_game_on_overlay || false);
+        this.setQuickToggleEnabled(settings.quick_toggle_enabled || false);
+        logger.setEnabled(settings.debug_mode || false);
+        this.setPassthroughMode(settings.passthrough_mode ?? false);
+        this.setTextBoxOpacity(settings.text_box_opacity ?? 80);
+        this.setSteamScreenshotTranslationEnabled(settings.steam_screenshot_translation_enabled ?? true);
+        this.setSteamScreenshotKeepOriginal(settings.steam_screenshot_keep_original ?? false);
+        this.setOcrProvider(settings.ocr_provider || "chromescreenai");
+        this.setHasGoogleApiKey(!!settings.google_api_key_configured);
+        this.setHasGeminiApiKey(!!settings.gemini_api_key_configured);
+        this.setLlmEndpoints(settings.llm_endpoints ?? [], settings.selected_llm_endpoint_id ?? '');
+        this.setFontScale(settings.font_scale ?? 1.0);
+        this.setGroupingPower(settings.grouping_power ?? 0.25);
+        this.setTranslatedTextAlignment(settings.translated_text_alignment ?? 'center');
+        this.setTranslatedTextFontFamily(settings.translated_text_font_family ?? '');
+        this.setTranslatedTextFontStyle(settings.translated_text_font_style ?? 'normal');
+        this.setHideIdenticalTranslations(settings.hide_identical_translations ?? false);
+        this.setAllowLabelGrowth(settings.allow_label_growth ?? false);
+
+        this.enabled = !!settings.enabled;
+        this.shortcutInput.setEnabled(this.enabled);
+        this.runtimeSettingsApplied = true;
     }
 
     // Add method to enable/disable the plugin
@@ -144,11 +237,6 @@ export class GameTranslatorLogic {
         if (this.shortcutInput) {
             this.shortcutInput.setEnabled(enabled);
         }
-
-        // Save to server settings file
-        call('set_setting', 'enabled', enabled).catch(error => {
-            logger.error('Translator', 'Failed to save enabled state to server', error);
-        });
 
         if (!enabled) {
             this.dismiss();
@@ -241,13 +329,13 @@ export class GameTranslatorLogic {
     }
 
     // Method to pause the current game
-    async pauseCurrentGame(): Promise<void> {
+    async pauseCurrentGame(): Promise<boolean> {
         try {
             // Get the current running app ID
             const mainApp = Router.MainRunningApp;
             if (!mainApp || !mainApp.appid) {
                 logger.debug('Translator', 'No game running to pause');
-                return;
+                return false;
             }
 
             // Use the pid_from_appid function to get the process ID
@@ -260,6 +348,7 @@ export class GameTranslatorLogic {
                 const pauseResult = await call<[number], boolean>('pause', pid);
                 if (pauseResult) {
                     logger.info('Translator', 'Game paused successfully');
+                    return true;
                 } else {
                     logger.error('Translator', 'Failed to pause game');
                 }
@@ -269,6 +358,7 @@ export class GameTranslatorLogic {
         } catch (error) {
             logger.error('Translator', 'Error pausing game', error);
         }
+        return false;
     }
 
     // Method to resume the current game
@@ -322,6 +412,7 @@ export class GameTranslatorLogic {
 
     // Clean up resources when plugin is unmounted
     cleanup(): void {
+        this.disposed = true;
         if (this.shortcutInput) {
             this.shortcutInput.unregister();
         }
@@ -334,8 +425,8 @@ export class GameTranslatorLogic {
 
     notify = async (message: string, duration: number = 1000, body?: string): Promise<void> => {
         toaster.toast({
-            title: message,
-            body: body || message,
+            title: t(message),
+            body: t(body || message),
             duration: duration,
             critical: true
         });
@@ -350,7 +441,15 @@ export class GameTranslatorLogic {
         }
     }
 
-    takeScreenshotAndTranslate = async (): Promise<void> => {
+    private hideImageAfterRunDelay(runId: number, delayMs: number): void {
+        setTimeout(() => {
+            if (runId === this.currentRunId) {
+                this.imageState.hideImage();
+            }
+        }, delayMs);
+    }
+
+    takeScreenshotAndTranslate = async (pauseBeforeCapture: boolean = false): Promise<void> => {
         // If already processing or disabled, return
         if (this.isProcessing || !this.enabled) {
             logger.debug('Translator', 'Already processing a screenshot or plugin disabled, skipping');
@@ -361,9 +460,19 @@ export class GameTranslatorLogic {
 
         const runId = ++this.currentRunId;
         const isCancelled = (): boolean => runId !== this.currentRunId;
+        let pausedForRun = false;
+        let overlayShownForRun = false;
 
         try {
             this.isProcessing = true;
+
+            if (pauseBeforeCapture && this.shouldPauseGameForOverlay()) {
+                pausedForRun = await this.pauseCurrentGame();
+                if (isCancelled()) {
+                    logger.debug('Translator', 'Translation cancelled while pausing the game');
+                    return;
+                }
+            }
 
             // Take screenshot FIRST while screen is clean (no overlay visible)
             const appName = Router.MainRunningApp?.display_name || "";
@@ -384,6 +493,7 @@ export class GameTranslatorLogic {
             logger.debug('Translator', `Screenshot captured, path: ${result.path}, base64 length: ${result.base64.length}`);
 
             this.imageState.startLoading("Processing");
+            overlayShownForRun = true;
             this.imageState.showImage(result.base64);
             const recognizingStep = this.ocrProvider === 'legacy_gemini_vision'
                 ? "Recognizing and Translating"
@@ -443,10 +553,8 @@ export class GameTranslatorLogic {
                 // No text found, show message
                 this.imageState.updateProcessingStep("No text found");
 
-                // Hide overlay after a short delay
-                setTimeout(() => {
-                    this.imageState.hideImage();
-                }, 2000); // 2 seconds delay
+                // Hide overlay after a short delay, unless a newer run started.
+                this.hideImageAfterRunDelay(runId, 2000); // 2 seconds delay
             }
         } catch (error) {
             if (isCancelled()) {
@@ -460,35 +568,33 @@ export class GameTranslatorLogic {
             if (error instanceof NetworkError) {
                 const msg = error.message || "No internet connection";
                 this.imageState.updateProcessingStep(msg, true);
-                // Hide overlay after showing the error message
-                setTimeout(() => {
-                    this.imageState.hideImage();
-                }, 2500); // 2.5 seconds delay for network error
+                // Hide overlay after showing the error message.
+                this.hideImageAfterRunDelay(runId, 2500); // 2.5 seconds delay for network error
             } else if (error instanceof ApiKeyError) {
                 this.imageState.updateProcessingStep(error.message || "Invalid API key", true);
-                // Hide overlay after showing the error message
-                setTimeout(() => {
-                    this.imageState.hideImage();
-                }, 2500); // 2.5 seconds delay for API key error
+                // Hide overlay after showing the error message.
+                this.hideImageAfterRunDelay(runId, 2500); // 2.5 seconds delay for API key error
             } else if (error instanceof ModelNotAvailableError) {
                 this.imageState.updateProcessingStep(error.message, true);
-                setTimeout(() => {
-                    this.imageState.hideImage();
-                }, 3000);
+                this.hideImageAfterRunDelay(runId, 3000);
             } else if (error instanceof RateLimitError) {
                 this.imageState.updateProcessingStep(error.message, true);
-                // Hide overlay after showing the error message
-                setTimeout(() => {
-                    this.imageState.hideImage();
-                }, 3000); // 3 seconds delay for rate limit error
+                // Hide overlay after showing the error message.
+                this.hideImageAfterRunDelay(runId, 3000); // 3 seconds delay for rate limit error
             } else if (error instanceof LLMError) {
                 this.imageState.updateProcessingStep(error.message, true);
-                setTimeout(() => this.imageState.hideImage(), 3000);
+                this.hideImageAfterRunDelay(runId, 3000);
             } else {
                 this.imageState.hideImage();
             }
         }
         finally {
+            if (
+                pausedForRun
+                && (!overlayShownForRun || !this.shouldPauseGameForOverlay())
+            ) {
+                await this.resumeCurrentGame();
+            }
             if (!isCancelled()) {
                 this.isProcessing = false;
             }
@@ -652,9 +758,7 @@ export class GameTranslatorLogic {
                 this.imageState.showTranslatedImage(result.base64, recognizedRegions);
             } else {
                 this.imageState.updateProcessingStep("No text found");
-                setTimeout(() => {
-                    if (!isCancelled()) this.imageState.hideImage();
-                }, 2000);
+                this.hideImageAfterRunDelay(runId, 2000);
             }
         } catch (error) {
             if (isCancelled()) {
@@ -672,9 +776,7 @@ export class GameTranslatorLogic {
             } else {
                 this.imageState.updateProcessingStep("OCR test failed", true);
             }
-            setTimeout(() => {
-                if (!isCancelled()) this.imageState.hideImage();
-            }, 3000);
+            this.hideImageAfterRunDelay(runId, 3000);
         } finally {
             if (!isCancelled()) {
                 this.isProcessing = false;
@@ -799,8 +901,23 @@ export class GameTranslatorLogic {
         }
     }
 
+    setLlmEndpoints = (endpoints: LLMEndpoint[], selectedId: string): void => {
+        const active = endpoints.find(endpoint => endpoint.id === selectedId);
+        this.setHasSelectedLLMEndpoint(!!active && active.enabled);
+        this.setLlmEndpointCacheKey(active ? JSON.stringify([
+            active.id,
+            active.provider,
+            active.baseUrl,
+            active.model,
+            active.visionEnabled,
+            active.temperature,
+            active.maxTokens,
+            active.enabled,
+        ]) : '');
+    }
+
     private translationMethodHint(): string {
-        return "Selected LLM endpoint";
+        return t("Selected LLM endpoint");
     }
 
     private ocrMethodHint(): string {
@@ -811,7 +928,7 @@ export class GameTranslatorLogic {
             googlecloud: "Google Cloud",
             legacy_gemini_vision: "Legacy Gemini Vision",
         };
-        return labels[this.ocrProvider] || this.ocrProvider;
+        return t(labels[this.ocrProvider] || this.ocrProvider);
     }
 
     setHasGoogleApiKey = (hasKey: boolean): void => {

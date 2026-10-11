@@ -1,10 +1,12 @@
 // src/SettingsContext.tsx
-import React, { createContext, useCallback, useContext, useEffect, useReducer } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useReducer, useRef } from 'react';
 import { call } from '@decky/api';
-import { GameTranslatorLogic } from './Translator';
+import { GameTranslatorLogic, isRuntimeSettingsSnapshot } from './Translator';
+import type { RuntimeSettingsSnapshot } from './Translator';
 import { InputMode } from './Input';
 import { logger } from './Logger';
 import type { LLMEndpoint } from './LLMEndpoints';
+import { normalizePluginLanguage, PluginLanguage, setPluginLanguage, t } from './i18n';
 
 export interface CustomLanguage {
     alias: string;
@@ -13,6 +15,7 @@ export interface CustomLanguage {
 
 // Define the settings interface
 export interface Settings {
+    pluginLanguage: PluginLanguage;
     inputLanguage: string;
     targetLanguage: string;
     customLanguages: CustomLanguage[];
@@ -58,6 +61,7 @@ type SettingsAction =
 
 // Define the initial state
 const initialSettings: Settings = {
+    pluginLanguage: "system",
     inputLanguage: "",
     targetLanguage: "",
     customLanguages: [],
@@ -113,25 +117,15 @@ function settingsReducer(state: Settings, action: SettingsAction): Settings {
 interface SettingsContextType {
     settings: Settings;
     updateSetting: (key: keyof Settings, value: any, label?: string) => Promise<boolean>;
+    updateLanguageSettings: (
+        customLanguages: CustomLanguage[],
+        targetLanguage: string,
+    ) => Promise<boolean>;
     refreshLlmEndpoints: () => Promise<void>;
     initialized: boolean;
 }
 
 const SettingsContext = createContext<SettingsContextType | undefined>(undefined);
-
-function buildLlmEndpointCacheKey(endpoint?: LLMEndpoint): string {
-    if (!endpoint) return '';
-    return JSON.stringify([
-        endpoint.id,
-        endpoint.provider,
-        endpoint.baseUrl,
-        endpoint.model,
-        endpoint.visionEnabled,
-        endpoint.temperature,
-        endpoint.maxTokens,
-        endpoint.enabled,
-    ]);
-}
 
 // Create the provider component
 interface SettingsProviderProps {
@@ -144,13 +138,18 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({
                                                                       logic
                                                                   }) => {
     const [settings, dispatch] = useReducer(settingsReducer, initialSettings);
+    const settingsRef = useRef(settings);
+    const settingUpdateVersionsRef = useRef<Partial<Record<keyof Settings, number>>>({});
 
     const applyLlmEndpoints = useCallback((endpoints: LLMEndpoint[], selectedId: string) => {
+        settingsRef.current = {
+            ...settingsRef.current,
+            llmEndpoints: endpoints,
+            selectedLlmEndpointId: selectedId,
+        };
         dispatch({ type: 'UPDATE_SETTING', key: 'llmEndpoints', value: endpoints });
         dispatch({ type: 'UPDATE_SETTING', key: 'selectedLlmEndpointId', value: selectedId });
-        const active = endpoints.find((endpoint) => endpoint.id === selectedId);
-        logic.setHasSelectedLLMEndpoint(!!active && active.enabled);
-        logic.setLlmEndpointCacheKey(buildLlmEndpointCacheKey(active));
+        logic.setLlmEndpoints(endpoints, selectedId);
     }, [logic]);
 
     const refreshLlmEndpoints = useCallback(async () => {
@@ -161,12 +160,31 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({
     // Load all settings at once
     const loadAllSettings = async () => {
         try {
-            const serverSettings = await call<[], any>('get_all_settings');
+            let serverSettings: (RuntimeSettingsSnapshot & Record<string, any>) | null = null;
+            const maxAttempts = 5;
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                try {
+                    const candidate = await call<[], unknown>('get_all_settings');
+                    if (isRuntimeSettingsSnapshot(candidate)) {
+                        serverSettings = candidate as RuntimeSettingsSnapshot & Record<string, any>;
+                        break;
+                    }
+
+                    logger.warn('SettingsContext', `Settings were not ready (attempt ${attempt}/${maxAttempts})`);
+                } catch (error) {
+                    logger.error('SettingsContext', `Failed to load settings (attempt ${attempt}/${maxAttempts})`, error);
+                }
+
+                if (attempt < maxAttempts) {
+                    await new Promise(resolve => setTimeout(resolve, attempt * 250));
+                }
+            }
 
             if (serverSettings) {
 
                 // Map backend settings to frontend settings
                 const mappedSettings: Partial<Settings> = {
+                    pluginLanguage: normalizePluginLanguage(serverSettings.plugin_language),
                     inputLanguage: serverSettings.input_language,
                     targetLanguage: serverSettings.target_language,
                     customLanguages: serverSettings.custom_languages ?? [],
@@ -203,46 +221,15 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({
                     selectedLlmEndpointId: serverSettings.selected_llm_endpoint_id ?? '',
                 };
 
+                setPluginLanguage(mappedSettings.pluginLanguage ?? 'system');
+
                 // Update settings in context
+                settingsRef.current = { ...settingsRef.current, ...mappedSettings };
                 dispatch({ type: 'INITIALIZE_SETTINGS', settings: mappedSettings });
 
-                // Update logic instance with settings
-                logic.setInputLanguage(serverSettings.input_language);
-                logic.setTargetLanguage(serverSettings.target_language);
-                logic.setInputMode(serverSettings.input_mode);
-                logic.setEnabled(serverSettings.enabled);
-                logic.setHoldTimeTranslate(serverSettings.hold_time_translate);
-                logic.setHoldTimeDismiss(serverSettings.hold_time_dismiss);
-                logic.setConfidenceThreshold(serverSettings.confidence_threshold || 0.6); // Set in logic
-                logic.setPauseGameOnOverlay(serverSettings.pause_game_on_overlay || false); // Set pause on overlay setting
-                logic.setQuickToggleEnabled(serverSettings.quick_toggle_enabled || false); // Set quick toggle setting
-                logger.setEnabled(serverSettings.debug_mode || false); // Set debug mode for logger
-                logic.setPassthroughMode(serverSettings.passthrough_mode ?? false);
-                logic.setTextBoxOpacity(serverSettings.text_box_opacity ?? 80);
-                logic.setSteamScreenshotTranslationEnabled(
-                    serverSettings.steam_screenshot_translation_enabled ?? true,
-                );
-                logic.setSteamScreenshotKeepOriginal(
-                    serverSettings.steam_screenshot_keep_original ?? false,
-                );
-
-                // Set provider settings for upfront API key validation
-                logic.setOcrProvider(serverSettings.ocr_provider || "chromescreenai");
-                logic.setHasGoogleApiKey(!!serverSettings.google_api_key_configured);
-                logic.setHasGeminiApiKey(!!serverSettings.gemini_api_key_configured);
-                const activeEndpoint = (serverSettings.llm_endpoints ?? []).find(
-                    (endpoint: LLMEndpoint) => endpoint.id === serverSettings.selected_llm_endpoint_id
-                );
-                logic.setHasSelectedLLMEndpoint(!!activeEndpoint && activeEndpoint.enabled);
-                logic.setLlmEndpointCacheKey(buildLlmEndpointCacheKey(activeEndpoint));
-
-                logic.setFontScale(serverSettings.font_scale ?? 1.0);
-                logic.setGroupingPower(serverSettings.grouping_power ?? 0.25);
-                logic.setTranslatedTextAlignment(serverSettings.translated_text_alignment ?? 'center');
-                logic.setTranslatedTextFontFamily(serverSettings.translated_text_font_family ?? '');
-                logic.setTranslatedTextFontStyle(serverSettings.translated_text_font_style ?? 'normal');
-                logic.setHideIdenticalTranslations(serverSettings.hide_identical_translations ?? false);
-                logic.setAllowLabelGrowth(serverSettings.allow_label_growth ?? false);
+                // Keep the runtime logic synchronized even when this panel is the
+                // first frontend component Decky mounts after plugin startup.
+                logic.applyRuntimeSettings(serverSettings);
 
                 logger.info('SettingsContext', 'All settings loaded successfully');
                 logger.logObject('SettingsContext', 'Settings', mappedSettings);
@@ -252,22 +239,114 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({
         } catch (error) {
             logger.error('SettingsContext', 'Error loading settings', error);
         } finally {
+            settingsRef.current = { ...settingsRef.current, initialized: true };
             dispatch({ type: 'SET_INITIALIZED', initialized: true });
         }
     };
 
+    const applySettingLocally = useCallback((key: keyof Settings, frontendValue: any, logicValue = frontendValue) => {
+        settingsRef.current = { ...settingsRef.current, [key]: frontendValue };
+        dispatch({ type: 'UPDATE_SETTING', key, value: frontendValue });
+
+        switch (key) {
+            case 'pluginLanguage':
+                setPluginLanguage(logicValue);
+                break;
+            case 'inputLanguage':
+                logic.setInputLanguage(logicValue);
+                break;
+            case 'targetLanguage':
+                logic.setTargetLanguage(logicValue);
+                break;
+            case 'inputMode':
+                logic.setInputMode(logicValue);
+                break;
+            case 'enabled':
+                logic.setEnabled(logicValue);
+                break;
+            case 'holdTimeTranslate':
+                logic.setHoldTimeTranslate(logicValue);
+                break;
+            case 'holdTimeDismiss':
+                logic.setHoldTimeDismiss(logicValue);
+                break;
+            case 'confidenceThreshold':
+                logic.setConfidenceThreshold(logicValue);
+                break;
+            case 'pauseGameOnOverlay':
+                logic.setPauseGameOnOverlay(logicValue);
+                break;
+            case 'quickToggleEnabled':
+                logic.setQuickToggleEnabled(logicValue);
+                break;
+            case 'debugMode':
+                logger.setEnabled(logicValue);
+                break;
+            case 'passthroughMode':
+                logic.setPassthroughMode(logicValue);
+                break;
+            case 'textBoxOpacity':
+                logic.setTextBoxOpacity(logicValue);
+                break;
+            case 'steamScreenshotTranslationEnabled':
+                logic.setSteamScreenshotTranslationEnabled(logicValue);
+                break;
+            case 'steamScreenshotKeepOriginal':
+                logic.setSteamScreenshotKeepOriginal(logicValue);
+                break;
+            case 'fontScale':
+                logic.setFontScale(logicValue);
+                break;
+            case 'groupingPower':
+                logic.setGroupingPower(logicValue);
+                break;
+            case 'translatedTextAlignment':
+                logic.setTranslatedTextAlignment(logicValue);
+                break;
+            case 'translatedTextFontFamily':
+                logic.setTranslatedTextFontFamily(logicValue);
+                break;
+            case 'translatedTextFontStyle':
+                logic.setTranslatedTextFontStyle(logicValue);
+                break;
+            case 'hideIdenticalTranslations':
+                logic.setHideIdenticalTranslations(logicValue);
+                break;
+            case 'allowLabelGrowth':
+                logic.setAllowLabelGrowth(logicValue);
+                break;
+            case 'ocrProvider':
+                logic.setOcrProvider(logicValue);
+                break;
+            case 'googleApiKey':
+                logic.setHasGoogleApiKey(!!logicValue);
+                break;
+            case 'geminiApiKey':
+                logic.setHasGeminiApiKey(!!logicValue);
+                break;
+        }
+    }, [logic]);
+
     // Update a single setting
     const updateSetting = async (key: keyof Settings, value: any, label?: string): Promise<boolean> => {
-        const previousValue = settings[key];
+        const previousValue = settingsRef.current[key];
+        const updateVersion = (settingUpdateVersionsRef.current[key] ?? 0) + 1;
+        settingUpdateVersionsRef.current[key] = updateVersion;
+        const rollbackIfCurrent = () => {
+            if (settingUpdateVersionsRef.current[key] === updateVersion) {
+                applySettingLocally(key, previousValue);
+            }
+        };
         try {
             // Update local state
             const frontendValue = (key === 'googleApiKey' || key === 'geminiApiKey')
                 ? (value ? 'configured' : '')
                 : value;
-            dispatch({ type: 'UPDATE_SETTING', key, value: frontendValue });
+            applySettingLocally(key, frontendValue, value);
 
             // Map frontend setting key to backend setting key
             const backendKeyMap: Record<keyof Settings, string> = {
+                pluginLanguage: 'plugin_language',
                 inputLanguage: 'input_language',
                 targetLanguage: 'target_language',
                 customLanguages: 'custom_languages',
@@ -310,82 +389,6 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({
 
             const backendKey = backendKeyMap[key];
 
-            // Update logic based on setting type
-            switch (key) {
-                case 'inputLanguage':
-                    logic.setInputLanguage(value);
-                    break;
-                case 'targetLanguage':
-                    logic.setTargetLanguage(value);
-                    break;
-                case 'inputMode':
-                    logic.setInputMode(value);
-                    break;
-                case 'enabled':
-                    logic.setEnabled(value);
-                    break;
-                case 'holdTimeTranslate':
-                    logic.setHoldTimeTranslate(value);
-                    break;
-                case 'holdTimeDismiss':
-                    logic.setHoldTimeDismiss(value);
-                    break;
-                case 'confidenceThreshold':
-                    logic.setConfidenceThreshold(value);
-                    break;
-                case 'pauseGameOnOverlay':
-                    logic.setPauseGameOnOverlay(value);
-                    break;
-                case 'quickToggleEnabled':
-                    logic.setQuickToggleEnabled(value);
-                    break;
-                case 'debugMode':
-                    logger.setEnabled(value);
-                    break;
-                case 'passthroughMode':
-                    logic.setPassthroughMode(value);
-                    break;
-                case 'textBoxOpacity':
-                    logic.setTextBoxOpacity(value);
-                    break;
-                case 'steamScreenshotTranslationEnabled':
-                    logic.setSteamScreenshotTranslationEnabled(value);
-                    break;
-                case 'steamScreenshotKeepOriginal':
-                    logic.setSteamScreenshotKeepOriginal(value);
-                    break;
-                case 'fontScale':
-                    logic.setFontScale(value);
-                    break;
-                case 'groupingPower':
-                    logic.setGroupingPower(value);
-                    break;
-                case 'translatedTextAlignment':
-                    logic.setTranslatedTextAlignment(value);
-                    break;
-                case 'translatedTextFontFamily':
-                    logic.setTranslatedTextFontFamily(value);
-                    break;
-                case 'translatedTextFontStyle':
-                    logic.setTranslatedTextFontStyle(value);
-                    break;
-                case 'hideIdenticalTranslations':
-                    logic.setHideIdenticalTranslations(value);
-                    break;
-                case 'allowLabelGrowth':
-                    logic.setAllowLabelGrowth(value);
-                    break;
-                case 'ocrProvider':
-                    logic.setOcrProvider(value);
-                    break;
-                case 'googleApiKey':
-                    logic.setHasGoogleApiKey(!!value);
-                    break;
-                case 'geminiApiKey':
-                    logic.setHasGeminiApiKey(!!value);
-                    break;
-            }
-
             // Save to backend
             const result = await call<[string, any], boolean>('set_setting', backendKey, value);
 
@@ -393,42 +396,48 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({
                 // if (label) logic.notify(`${label} updated successfully`);
                 return true;
             } else {
-                if (
-                    key === 'customLanguages'
-                    || key === 'targetLanguage'
-                    || key === 'steamScreenshotTranslationEnabled'
-                    || key === 'steamScreenshotKeepOriginal'
-                ) {
-                    dispatch({ type: 'UPDATE_SETTING', key, value: previousValue });
-                }
-                if (key === 'targetLanguage') logic.setTargetLanguage(previousValue as string);
-                if (key === 'steamScreenshotTranslationEnabled') {
-                    logic.setSteamScreenshotTranslationEnabled(previousValue as boolean);
-                }
-                if (key === 'steamScreenshotKeepOriginal') {
-                    logic.setSteamScreenshotKeepOriginal(previousValue as boolean);
-                }
-                logic.notify(`Failed to update ${label || key}`, 2000);
+                rollbackIfCurrent();
+                logic.notify(t('Failed to update {setting}', { setting: label || key }), 2000);
                 return false;
             }
         } catch (error) {
-            if (
-                key === 'customLanguages'
-                || key === 'targetLanguage'
-                || key === 'steamScreenshotTranslationEnabled'
-                || key === 'steamScreenshotKeepOriginal'
-            ) {
-                dispatch({ type: 'UPDATE_SETTING', key, value: previousValue });
-            }
-            if (key === 'targetLanguage') logic.setTargetLanguage(previousValue as string);
-            if (key === 'steamScreenshotTranslationEnabled') {
-                logic.setSteamScreenshotTranslationEnabled(previousValue as boolean);
-            }
-            if (key === 'steamScreenshotKeepOriginal') {
-                logic.setSteamScreenshotKeepOriginal(previousValue as boolean);
-            }
+            rollbackIfCurrent();
             logger.error('SettingsContext', `Failed to update ${key}`, error);
-            logic.notify(`Failed to update ${label || key}`, 2000);
+            logic.notify(t('Failed to update {setting}', { setting: label || key }), 2000);
+            return false;
+        }
+    };
+
+    const updateLanguageSettings = async (
+        customLanguages: CustomLanguage[],
+        targetLanguage: string,
+    ): Promise<boolean> => {
+        try {
+            const result = await call<
+                [CustomLanguage[], string],
+                {
+                    success: boolean;
+                    custom_languages?: CustomLanguage[];
+                    target_language?: string;
+                }
+            >('set_language_settings', customLanguages, targetLanguage);
+            if (!result?.success) {
+                logic.notify(t('Failed to update {setting}', { setting: 'Custom languages' }), 2000);
+                return false;
+            }
+
+            applySettingLocally(
+                'customLanguages',
+                result.custom_languages ?? customLanguages,
+            );
+            applySettingLocally(
+                'targetLanguage',
+                result.target_language ?? targetLanguage,
+            );
+            return true;
+        } catch (error) {
+            logger.error('SettingsContext', 'Failed to update custom languages', error);
+            logic.notify(t('Failed to update {setting}', { setting: 'Custom languages' }), 2000);
             return false;
         }
     };
@@ -442,6 +451,7 @@ export const SettingsProvider: React.FC<SettingsProviderProps> = ({
         <SettingsContext.Provider value={{
             settings,
             updateSetting,
+            updateLanguageSettings,
             refreshLlmEndpoints,
             initialized: settings.initialized
         }}>
