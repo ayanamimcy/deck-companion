@@ -50,7 +50,7 @@
     {
       "name": "plugin-dependencies.tar.gz",
       "url": "https://github.com/ayanamimcy/deck-companion/releases/download/deps-v1/plugin-dependencies.tar.gz",
-      "sha256hash": "TODO-set-after-building-deps"
+      "sha256hash": "596a923c9a17c411f6ce8cc900ad03e0a91db0ecf2e3e1439e990d01a55f35d8"
     }
   ]
 }
